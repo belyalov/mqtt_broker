@@ -55,13 +55,21 @@ func (b *MqttSimple) Start(ctx context.Context) error {
 }
 
 func (b *MqttSimple) Subscribe(topic string, qos byte) (<-chan string, error) {
+	// Create channel and add it to subscribers list
+	ch := make(chan string, 1)
+	b.subscriptions[topic] = append(b.subscriptions[topic], ch)
+
 	// Subscribe to given topic
 	if token := b.client.Subscribe(topic, qos, nil); token.Wait() && token.Error() != nil {
 		return nil, token.Error()
 	}
 
-	// Return channel to this topic
-	ch := make(chan string, 1)
-	b.subscriptions[topic] = append(b.subscriptions[topic], ch)
 	return ch, nil
+}
+
+func (b *MqttSimple) Publish(topic, value string, qos byte, retained bool) error {
+	if token := b.client.Publish(topic, qos, retained, value); token.Wait() && token.Error() != nil {
+		return token.Error()
+	}
+	return nil
 }
