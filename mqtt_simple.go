@@ -1,17 +1,20 @@
 package mqtt_simple
 
 import (
+	"sync"
+
 	pmqtt "github.com/eclipse/paho.mqtt.golang"
 	"golang.org/x/net/context"
 )
 
-type MqttSimple struct {
+type MqttSimpleClient struct {
 	client        pmqtt.Client
 	opts          *pmqtt.ClientOptions
 	subscriptions map[string][]chan string
+	lock          sync.Mutex
 }
 
-func NewMqttSimple(broker, clientid, user, password string) *MqttSimple {
+func NewMqttSimpleClient(broker, clientid, user, password string) *MqttSimpleClient {
 
 	opts := pmqtt.NewClientOptions()
 	opts.AddBroker(broker)
@@ -20,23 +23,28 @@ func NewMqttSimple(broker, clientid, user, password string) *MqttSimple {
 	opts.SetPassword(password)
 	opts.SetCleanSession(true)
 
-	return &MqttSimple{
+	return &MqttSimpleClient{
 		opts:          opts,
 		subscriptions: make(map[string][]chan string),
 	}
 }
 
-func (b *MqttSimple) onMessage(client pmqtt.Client, msg pmqtt.Message) {
-	payload := string(msg.Payload())
+func (b *MqttSimpleClient) onMessage(client pmqtt.Client, msg pmqtt.Message) {
+	// Get list of subscribers
+	b.lock.Lock()
+	channels, ok := b.subscriptions[msg.Topic()]
+	b.lock.Unlock()
+	if !ok {
+		return
+	}
 	// Broadcast message to all subscribers
-	if channels, ok := b.subscriptions[msg.Topic()]; ok {
-		for _, ch := range channels {
-			ch <- payload
-		}
+	payload := string(msg.Payload())
+	for _, ch := range channels {
+		ch <- payload
 	}
 }
 
-func (b *MqttSimple) Start(ctx context.Context) error {
+func (b *MqttSimpleClient) Start(ctx context.Context) error {
 
 	b.opts.SetDefaultPublishHandler(b.onMessage)
 
@@ -54,10 +62,12 @@ func (b *MqttSimple) Start(ctx context.Context) error {
 	return nil
 }
 
-func (b *MqttSimple) Subscribe(topic string, qos byte) (<-chan string, error) {
+func (b *MqttSimpleClient) Subscribe(topic string, qos byte) (<-chan string, error) {
 	// Create channel and add it to subscribers list
-	ch := make(chan string, 1)
+	ch := make(chan string)
+	b.lock.Lock()
 	b.subscriptions[topic] = append(b.subscriptions[topic], ch)
+	b.lock.Unlock()
 
 	// Subscribe to given topic
 	if token := b.client.Subscribe(topic, qos, nil); token.Wait() && token.Error() != nil {
@@ -67,7 +77,7 @@ func (b *MqttSimple) Subscribe(topic string, qos byte) (<-chan string, error) {
 	return ch, nil
 }
 
-func (b *MqttSimple) Publish(topic, value string, qos byte, retained bool) error {
+func (b *MqttSimpleClient) Publish(topic, value string, qos byte, retained bool) error {
 	if token := b.client.Publish(topic, qos, retained, value); token.Wait() && token.Error() != nil {
 		return token.Error()
 	}
