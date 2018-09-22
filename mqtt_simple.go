@@ -21,7 +21,7 @@ func NewMqttSimpleClient(broker, clientid, user, password string) *MqttSimpleCli
 	opts.SetClientID(clientid)
 	opts.SetUsername(user)
 	opts.SetPassword(password)
-	opts.SetCleanSession(true)
+	opts.SetCleanSession(false)
 
 	return &MqttSimpleClient{
 		opts:          opts,
@@ -42,6 +42,10 @@ func (b *MqttSimpleClient) onMessage(client pmqtt.Client, msg pmqtt.Message) {
 	for _, ch := range channels {
 		ch <- payload
 	}
+}
+
+func (b *MqttSimpleClient) SetCleanSession(state bool) {
+	b.opts.SetCleanSession(state)
 }
 
 func (b *MqttSimpleClient) Start(ctx context.Context) error {
