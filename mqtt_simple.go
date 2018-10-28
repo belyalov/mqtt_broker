@@ -7,11 +7,19 @@ import (
 	"golang.org/x/net/context"
 )
 
+type MessageCallback func(topic, value string)
+
 type MqttSimpleClient struct {
-	client        pmqtt.Client
-	opts          *pmqtt.ClientOptions
-	subscriptions map[string][]chan string
-	lock          sync.Mutex
+	client                pmqtt.Client
+	opts                  *pmqtt.ClientOptions
+	subscriptions         map[string][]chan string
+	wildcardSubscriptions []chan *MqttMessage
+	lock                  sync.Mutex
+}
+
+type MqttMessage struct {
+	Topic string `json:"topic"`
+	Value string `json:"value"`
 }
 
 func NewMqttSimpleClient(broker, clientid, user, password string) *MqttSimpleClient {
@@ -29,18 +37,26 @@ func NewMqttSimpleClient(broker, clientid, user, password string) *MqttSimpleCli
 	}
 }
 
-func (b *MqttSimpleClient) onMessage(client pmqtt.Client, msg pmqtt.Message) {
-	// Get list of subscribers
+func (b *MqttSimpleClient) onMessage(client pmqtt.Client, pmsg pmqtt.Message) {
+	// Firstly process wildcard subscribers
+	msg := &MqttMessage{
+		Topic: string(pmsg.Topic()),
+		Value: string(pmsg.Payload()),
+	}
+	for _, ch := range b.wildcardSubscriptions {
+		ch <- msg
+	}
+
+	// Handle specific topic subscribers
 	b.lock.Lock()
-	channels, ok := b.subscriptions[msg.Topic()]
+	channels, ok := b.subscriptions[msg.Topic]
 	b.lock.Unlock()
 	if !ok {
 		return
 	}
-	// Broadcast message to all subscribers
-	payload := string(msg.Payload())
+
 	for _, ch := range channels {
-		ch <- payload
+		ch <- msg.Value
 	}
 }
 
@@ -67,16 +83,31 @@ func (b *MqttSimpleClient) Start(ctx context.Context) error {
 }
 
 func (b *MqttSimpleClient) Subscribe(topic string, qos byte) (<-chan string, error) {
+	// Subscribe to given topic
+	if token := b.client.Subscribe(topic, qos, nil); token.Wait() && token.Error() != nil {
+		return nil, token.Error()
+	}
+
 	// Create channel and add it to subscribers list
 	ch := make(chan string)
 	b.lock.Lock()
 	b.subscriptions[topic] = append(b.subscriptions[topic], ch)
 	b.lock.Unlock()
 
-	// Subscribe to given topic
-	if token := b.client.Subscribe(topic, qos, nil); token.Wait() && token.Error() != nil {
+	return ch, nil
+}
+
+func (b *MqttSimpleClient) SubscribeToEverything(qos byte) (<-chan *MqttMessage, error) {
+	// Subscribe to all topics
+	if token := b.client.Subscribe("#", qos, nil); token.Wait() && token.Error() != nil {
 		return nil, token.Error()
 	}
+
+	// Create channel and add it to wildcard subscribers list
+	ch := make(chan *MqttMessage)
+	b.lock.Lock()
+	b.wildcardSubscriptions = append(b.wildcardSubscriptions, ch)
+	b.lock.Unlock()
 
 	return ch, nil
 }
