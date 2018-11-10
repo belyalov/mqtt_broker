@@ -4,7 +4,6 @@ import (
 	"sync"
 
 	pmqtt "github.com/eclipse/paho.mqtt.golang"
-	"golang.org/x/net/context"
 )
 
 type MessageCallback func(topic, value string)
@@ -12,7 +11,7 @@ type MessageCallback func(topic, value string)
 type MqttSimpleClient struct {
 	client                pmqtt.Client
 	opts                  *pmqtt.ClientOptions
-	subscriptions         map[string][]chan string
+	subscriptions         map[string][]chan *MqttMessage
 	wildcardSubscriptions []chan *MqttMessage
 	lock                  sync.Mutex
 }
@@ -33,7 +32,7 @@ func NewMqttSimpleClient(broker, clientid, user, password string) *MqttSimpleCli
 
 	return &MqttSimpleClient{
 		opts:          opts,
-		subscriptions: make(map[string][]chan string),
+		subscriptions: make(map[string][]chan *MqttMessage),
 	}
 }
 
@@ -54,9 +53,8 @@ func (b *MqttSimpleClient) onMessage(client pmqtt.Client, pmsg pmqtt.Message) {
 	if !ok {
 		return
 	}
-
 	for _, ch := range channels {
-		ch <- msg.Value
+		ch <- msg
 	}
 }
 
@@ -64,7 +62,7 @@ func (b *MqttSimpleClient) SetCleanSession(state bool) {
 	b.opts.SetCleanSession(state)
 }
 
-func (b *MqttSimpleClient) Start(ctx context.Context) error {
+func (b *MqttSimpleClient) Connect() error {
 
 	b.opts.SetDefaultPublishHandler(b.onMessage)
 
@@ -73,26 +71,46 @@ func (b *MqttSimpleClient) Start(ctx context.Context) error {
 		return token.Error()
 	}
 
-	// To be able to disconnect client whenever context is done
-	go func() {
-		<-ctx.Done()
-		b.client.Disconnect(100)
-	}()
-
 	return nil
 }
 
-func (b *MqttSimpleClient) Subscribe(topic string, qos byte) (<-chan string, error) {
+func (b *MqttSimpleClient) Disconnect(timeout uint) {
+	b.client.Disconnect(timeout)
+}
+
+func (b *MqttSimpleClient) Subscribe(topic string, qos byte) (<-chan *MqttMessage, error) {
 	// Subscribe to given topic
 	if token := b.client.Subscribe(topic, qos, nil); token.Wait() && token.Error() != nil {
 		return nil, token.Error()
 	}
 
 	// Create channel and add it to subscribers list
-	ch := make(chan string)
+	ch := make(chan *MqttMessage)
 	b.lock.Lock()
 	b.subscriptions[topic] = append(b.subscriptions[topic], ch)
 	b.lock.Unlock()
+
+	return ch, nil
+}
+
+func (b *MqttSimpleClient) SubscribeMultiple(topics []string, qos byte) (<-chan *MqttMessage, error) {
+	// Subscribe to given topics
+	topicsMap := map[string]byte{}
+	for _, t := range topics {
+		topicsMap[t] = qos
+	}
+	if token := b.client.SubscribeMultiple(topicsMap, nil); token.Wait() && token.Error() != nil {
+		return nil, token.Error()
+	}
+
+	// Create channel and add it to subscribers list
+	ch := make(chan *MqttMessage)
+	b.lock.Lock()
+	defer b.lock.Unlock()
+
+	for _, t := range topics {
+		b.subscriptions[t] = append(b.subscriptions[t], ch)
+	}
 
 	return ch, nil
 }
@@ -106,8 +124,9 @@ func (b *MqttSimpleClient) SubscribeToEverything(qos byte) (<-chan *MqttMessage,
 	// Create channel and add it to wildcard subscribers list
 	ch := make(chan *MqttMessage)
 	b.lock.Lock()
+	defer b.lock.Unlock()
+
 	b.wildcardSubscriptions = append(b.wildcardSubscriptions, ch)
-	b.lock.Unlock()
 
 	return ch, nil
 }
